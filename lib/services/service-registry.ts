@@ -3,11 +3,11 @@ import { hasSpecificViabilityCheck } from '@/lib/data/viability-checks';
 import { getReadinessCheck, hasReadinessCheck } from '@/lib/data/service-readiness-checks';
 
 export type ServiceFlowType =
-  | 'viability'            // shows ViabilityButton (juridical/fiscal eligibility check)
-  | 'readiness'            // shows ReadinessButton (technical preparation check)
-  | 'direct_checkout'      // goes straight to checkout
-  | 'quote'                // no checkout, request-a-quote flow
-  | 'subscription_readiness'; // monthly plans with readiness check
+  | 'viability'
+  | 'readiness'
+  | 'direct_checkout'
+  | 'quote'
+  | 'subscription_readiness';
 
 export interface ServiceRegistryEntry {
   slug          : string;
@@ -17,23 +17,14 @@ export interface ServiceRegistryEntry {
   stripePriceId : string | undefined;
   hasViability  : boolean;
   hasCheckout   : boolean;
-  /** Determined flow type for this service */
   flowType      : ServiceFlowType;
-  /** Whether a ReadinessCheck exists for this slug */
   hasReadiness  : boolean;
-  /** Slug to use when looking up the ReadinessCheck (defaults to service slug) */
   readinessSlug : string;
-  /** True for Holded services that need an active Holded licence */
   requiresHoldedLicense: boolean;
-  /** True for Holded API-integration services */
   requiresHoldedApi    : boolean;
-  /** True for recurring monthly plan services */
   isSubscription       : boolean;
-  /** True when checkout must validate an active Holded connection */
   requiresHoldedConnectionBeforeCheckout: boolean;
-  /** True when profile completion is required before checkout */
   requiresProfileCompleted: boolean;
-  /** True when billing data is required before checkout */
   requiresBillingReady: boolean;
 }
 
@@ -41,6 +32,7 @@ const HOLDED_SLUGS = new Set([
   'holded-pack-starter',
   'holded-migracion-sin-inventario',
   'holded-migracion-con-inventario',
+  'holded-migracion-laboral',
   'holded-modulo-laboral',
   'holded-modulo-formacion',
   'holded-integraciones-api',
@@ -68,8 +60,8 @@ function resolveFlowType(slug: string, categoria: string): ServiceFlowType {
   if (QUOTE_PLAN_SLUGS.has(slug)) return 'quote';
   if (MONTHLY_PLAN_SLUGS.has(slug)) return 'subscription_readiness';
   if (HOLDED_SLUGS.has(slug) || categoria === 'holded') return 'readiness';
-  if (hasSpecificViabilityCheck(slug))                   return 'viability';
-  if (hasReadinessCheck(slug))                           return 'readiness';
+  if (hasSpecificViabilityCheck(slug)) return 'viability';
+  if (hasReadinessCheck(slug)) return 'readiness';
   return 'direct_checkout';
 }
 

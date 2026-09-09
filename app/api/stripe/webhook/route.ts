@@ -8,6 +8,7 @@ import { syncOrderToHolded, syncSubscriptionToHolded } from '@/lib/integrations/
 import { computeProfileReadiness } from '@/lib/utils/profile-readiness';
 import { getCalOnboardingUrl, getCalFormacionUrl } from '@/lib/utils/cal';
 import { persistAcademyCertificationPayment, persistAcademyProgramPayment } from '@/lib/payments/academy-fulfillment';
+import { fulfillQuotePayment } from '@/lib/payments/quote-fulfillment';
 import { legacyOrderFields, requireCreatedOrderId } from '@/lib/payments/non-academy-order';
 import {
   academyEnrollmentConfirmed,
@@ -18,7 +19,6 @@ import {
   academyCertificationPaidAdmin,
   holdedFormacionConfirmed,
   holdedMigrationConfirmed,
-  paymentConfirmed,
   servicePaymentConfirmed,
   servicePaymentConfirmedAdmin,
   subscriptionCreated,
@@ -190,8 +190,6 @@ async function getClientEmail(userId: string): Promise<{ email: string; name: st
   return { email, name: profile?.full_name ?? email.split('@')[0] };
 }
 
-// ── IMP-005: Durable Holded job queue helpers ─────────────────────────────────
-
 async function enqueueHoldedSync(
   supabaseAdmin: SupabaseAdmin,
   jobType: string,
@@ -316,8 +314,6 @@ async function handleSubscriptionActivation(
   });
 }
 
-// ── Order Holded trace helper ─────────────────────────────────────────────────
-
 async function updateOrderHoldedResult(
   supabaseAdmin: SupabaseAdmin,
   orderId: string | undefined,
@@ -350,12 +346,6 @@ async function updateOrderHoldedResult(
   }
 }
 
-// Shared by the checkout.session.completed (payment_status === 'paid') and
-// checkout.session.async_payment_succeeded handlers below — a delayed
-// payment method (e.g. SEPA debit) can make Stripe send "completed" with
-// payment_status still 'unpaid', with the actual confirmation arriving
-// later as async_payment_succeeded. Fulfilling only on a definitively
-// paid session avoids granting access for a payment that can still fail.
 async function fulfillAcademyCertification(supabaseAdmin: SupabaseAdmin, session: Stripe.Checkout.Session) {
   const enrollmentId = session.metadata?.enrollment_id ?? '';
   if (!enrollmentId) return;
@@ -408,15 +398,6 @@ async function fulfillAcademyCertification(supabaseAdmin: SupabaseAdmin, session
   console.log(JSON.stringify({ webhook: 'stripe', event: 'checkout.session.completed', product_type: 'academy_certification', enrollment_id: enrollmentId, session_id: session.id }));
 }
 
-// Shared by checkout.session.completed (payment_status === 'paid') and
-// checkout.session.async_payment_succeeded — same rationale as
-// fulfillAcademyCertification above: a delayed payment method can leave a
-// session "completed" but still unpaid, with the real confirmation arriving
-// later via the async event. Internal /api/academy/checkout Sessions carry
-// client_reference_id (login required); external Payment Link purchases
-// (e.g. Gestión Laboral Integral) don't require login before paying, so we
-// fall back to matching the buyer's checkout email against an existing
-// profile.
 async function fulfillAcademyProgram(supabaseAdmin: SupabaseAdmin, session: Stripe.Checkout.Session) {
   const programSlug = session.metadata?.program_slug ?? '';
   const programName = session.metadata?.program_name ?? 'Programa EXPERT Business Academy';
@@ -445,7 +426,6 @@ async function fulfillAcademyProgram(supabaseAdmin: SupabaseAdmin, session: Stri
   if (!persisted.created) return;
 
   if (clientId) {
-
     if (customerEmail) {
       const tpl = academyEnrollmentConfirmed(customerName, programName, amountEur);
       await sendEmail({
@@ -474,10 +454,6 @@ async function fulfillAcademyProgram(supabaseAdmin: SupabaseAdmin, session: Stri
       }).catch(() => {});
     }
   } else if (customerEmail) {
-    // Payment Link purchase with no matching profile yet — record the
-    // payment (orders row above) but leave academy_enrollments empty
-    // until an admin links it after the buyer creates/logs into an
-    // account with the same email.
     const tpl = academyEnrollmentPendingLink(customerName, programName);
     await sendEmail({
       to: customerEmail,
@@ -537,557 +513,399 @@ export async function POST(req: NextRequest) {
   if (!claimed) return NextResponse.json({ received: true });
 
   try {
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object as Stripe.Checkout.Session;
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object as Stripe.Checkout.Session;
-
-    if (session.mode === 'payment') {
-      // client_reference_id is now user.id for catalog payments — use metadata.quote_id only
-      const quoteId = session.metadata?.quote_id ?? null;
-      if (quoteId) {
-        const { data: quote, error: quoteFetchError } = await supabaseAdmin
-          .from('quotes')
-          .select('client_id,lead_id,title,docs_checklist')
-          .eq('id', quoteId)
-          .single();
-
-        if (!quote || quoteFetchError) {
-          console.error('Quote not found for webhook:', quoteFetchError);
-        } else {
-          const amountEur = Number(session.amount_total ?? 0) / 100;
-          const paymentId = (session.payment_intent as string) ?? session.id;
-          const currency = session.currency?.toUpperCase() ?? 'EUR';
-
-          // ── Idempotency: skip if order already exists for this payment ──
-          const { data: existingOrder } = await supabaseAdmin
-            .from('orders')
-            .select('id')
-            .eq('stripe_payment_id', paymentId)
-            .maybeSingle();
-
-          if (existingOrder) {
-            console.log('[webhook] order already exists for payment', paymentId, '— skipping');
-          } else {
-            await supabaseAdmin
-              .from('quotes')
-              .update({ status: 'paid', stripe_checkout_id: session.id })
-              .eq('id', quoteId);
-
-            // ── Insert order ──
-            const orderMetadata = {
-              checkout_session: {
-                id: session.id,
-                payment_intent: session.payment_intent,
-                customer_email: session.customer_email
-              }
-            };
-
-            const { data: newOrder, error: orderError } = await supabaseAdmin.from('orders').insert({
-              source: 'quote',
-              quote_id: quoteId,
-              client_id: quote.client_id,
-              stripe_payment_id: paymentId,
-              amount_eur: amountEur,
-              ...legacyOrderFields(amountEur, quote.title),
-              currency,
-              status: 'paid',
-              metadata: orderMetadata
-            }).select('id').single();
-
-            const newOrderId = requireCreatedOrderId('quote', orderError, newOrder?.id);
-
-            if (quote.client_id) {
-              const { data: existingCase } = await supabaseAdmin
-                .from('cases')
-                .select('id')
-                .eq('quote_id', quoteId)
-                .maybeSingle();
-
-              if (!existingCase) {
-                await supabaseAdmin.from('cases').insert({
-                  quote_id: quoteId,
-                  client_id: quote.client_id,
-                  category: 'presupuesto',
-                  service: quote.title ?? 'servicio',
-                  state: Array.isArray(quote.docs_checklist) && quote.docs_checklist.length > 0 ? 'docs_pendientes' : 'nuevo',
-                  docs_checklist: Array.isArray(quote.docs_checklist) ? quote.docs_checklist : []
-                });
-              }
-            }
-
-            const clientEmail =
-              session.customer_email ?? (session.customer_details as { email?: string } | null)?.email;
-
-            if (clientEmail) {
-              let clientName = clientEmail.split('@')[0];
-              if (quote.client_id) {
-                const info = await getClientEmail(quote.client_id);
-                if (info) clientName = info.name;
-              }
-
-              const tpl = paymentConfirmed(clientName, amountEur, quote.title ?? 'Servicio contratado');
-              await sendEmail({
-                to: clientEmail,
-                eventType: 'payment.confirmed',
-                ...tpl,
-                metadata: { quote_id: quoteId, session_id: session.id }
-              });
-
-              notifyAdmins({
-                title: `💰 Pago recibido — ${clientName}`,
-                body:  `${(quote.title ?? 'Presupuesto').slice(0, 60)} · €${amountEur.toFixed(0)}`,
-                url:   `/admin/presupuestos`,
-                tag:   `payment-${quoteId}`,
-              }).catch(() => {});
-
-              {
-                const adminEmails = getAdminEmails();
-                if (adminEmails.length) {
-                  const adminTpl = servicePaymentConfirmedAdmin(clientName, clientEmail, amountEur, quote.title ?? 'Presupuesto');
-                  sendEmail({
-                    to: adminEmails,
-                    eventType: 'payment.confirmed.admin',
-                    ...adminTpl,
-                    metadata: { quote_id: quoteId, session_id: session.id }
-                  }).catch((err) => {
-                    console.error('[webhook] admin payment email failed (quote):', err);
-                  });
-                }
-              }
-
-              // IMP-005: enqueue job BEFORE the async call so it survives
-              // if the serverless function is killed before .then() runs.
-              const quoteJobId = await enqueueHoldedSync(supabaseAdmin, 'sync_order_holded', {
-                clientName, clientEmail,
-                description: quote.title ?? 'Servicio EXPERT',
-                amountEur, orderId: newOrderId, localEntity: 'orders',
-              });
-              await startHoldedJob(supabaseAdmin, quoteJobId);
-              syncOrderToHolded({
-                clientName,
-                clientEmail,
-                description: quote.title ?? 'Servicio EXPERT',
-                amountEur,
-                orderId: newOrderId,
-                localEntity: 'orders'
-              }).then((result) => {
-                void resolveHoldedJob(supabaseAdmin, quoteJobId, result.error ? 'failed' : 'success', result.error);
-                updateOrderHoldedResult(supabaseAdmin, newOrderId, result, orderMetadata).catch((err) => {
-                  console.error('[webhook] holded trace update failed:', err);
-                });
-              }).catch((err) => {
-                console.error('[webhook] holded sync failed:', err);
-                void resolveHoldedJob(supabaseAdmin, quoteJobId, 'failed', err instanceof Error ? err.message : String(err));
-                updateOrderHoldedResult(
-                  supabaseAdmin,
-                  newOrderId,
-                  { contactId: null, invoiceId: null, syncEventId: null, error: err instanceof Error ? err.message : String(err) },
-                  orderMetadata
-                ).catch(() => {});
-              });
-            }
-          }
-        }
+      if (session.mode === 'payment' && session.metadata?.quote_id && session.payment_status === 'paid') {
+        await fulfillQuotePayment(supabaseAdmin, session);
       }
-    }
 
-    const productType = session.metadata?.product_type;
+      const productType = session.metadata?.product_type;
 
-    if (session.mode === 'payment' && productType === 'academy_program' && session.payment_status === 'paid') {
-      await fulfillAcademyProgram(supabaseAdmin, session);
-    }
+      if (session.mode === 'payment' && productType === 'academy_program' && session.payment_status === 'paid') {
+        await fulfillAcademyProgram(supabaseAdmin, session);
+      }
 
-    if (session.mode === 'payment' && productType === 'academy_certification' && session.payment_status === 'paid') {
-      await fulfillAcademyCertification(supabaseAdmin, session);
-    }
+      if (session.mode === 'payment' && productType === 'academy_certification' && session.payment_status === 'paid') {
+        await fulfillAcademyCertification(supabaseAdmin, session);
+      }
 
-    if (session.mode === 'payment' && (productType === 'service' || productType === 'cart')) {
-      const customerEmail = session.customer_email ?? (session.customer_details as { email?: string } | null)?.email;
-      const customerName =
-        (session.customer_details as { name?: string } | null)?.name ??
-        customerEmail?.split('@')[0] ??
-        'Cliente';
-      const serviceName =
-        session.metadata?.service_name ??
-        session.metadata?.service_names ??
-        'Servicio EXPERT';
-      const amountEur = Number(session.amount_total ?? 0) / 100;
-      const paymentId  = (session.payment_intent as string) ?? session.id;
-      let catalogOrderMetadata: Record<string, unknown> = {
-        checkout_session: {
-          id             : session.id,
-          payment_intent : session.payment_intent,
-          customer_email : customerEmail ?? null,
-          product_type   : productType,
-        },
-      };
+      if (session.mode === 'payment' && (productType === 'service' || productType === 'cart')) {
+        const customerEmail = session.customer_email ?? (session.customer_details as { email?: string } | null)?.email;
+        const customerName =
+          (session.customer_details as { name?: string } | null)?.name ??
+          customerEmail?.split('@')[0] ??
+          'Cliente';
+        const serviceName =
+          session.metadata?.service_name ??
+          session.metadata?.service_names ??
+          'Servicio EXPERT';
+        const amountEur = Number(session.amount_total ?? 0) / 100;
+        const paymentId  = (session.payment_intent as string) ?? session.id;
+        let catalogOrderMetadata: Record<string, unknown> = {
+          checkout_session: {
+            id             : session.id,
+            payment_intent : session.payment_intent,
+            customer_email : customerEmail ?? null,
+            product_type   : productType,
+          },
+        };
 
-      // ── Idempotency: create order record for catalog payment ──
-      const { data: existingCatalogOrder } = await supabaseAdmin
-        .from('orders')
-        .select('id,metadata')
-        .eq('stripe_payment_id', paymentId)
-        .maybeSingle();
-
-      let catalogOrderId: string | undefined;
-      if (!existingCatalogOrder) {
-        const { data: newCatalogOrder, error: catalogOrderError } = await supabaseAdmin
+        const { data: existingCatalogOrder } = await supabaseAdmin
           .from('orders')
-          .insert({
-            source          : 'catalog',
-            client_id       : session.client_reference_id ?? null,
-            company_id      : session.metadata?.company_id ?? null,
-            stripe_payment_id: paymentId,
-            amount_eur      : amountEur,
-            ...legacyOrderFields(amountEur, serviceName),
-            currency        : session.currency?.toUpperCase() ?? 'EUR',
-            status          : 'paid',
-            service_slugs   : session.metadata?.service_slugs ?? session.metadata?.service_slug ?? null,
-            metadata        : catalogOrderMetadata,
-          })
-          .select('id')
-          .single();
+          .select('id,metadata')
+          .eq('stripe_payment_id', paymentId)
+          .maybeSingle();
 
-        catalogOrderId = requireCreatedOrderId('catalog', catalogOrderError, newCatalogOrder?.id);
-      } else {
-        catalogOrderId = existingCatalogOrder.id;
-        catalogOrderMetadata = (existingCatalogOrder.metadata ?? catalogOrderMetadata) as Record<string, unknown>;
-      }
+        let catalogOrderId: string | undefined;
+        if (!existingCatalogOrder) {
+          const { data: newCatalogOrder, error: catalogOrderError } = await supabaseAdmin
+            .from('orders')
+            .insert({
+              source          : 'catalog',
+              client_id       : session.client_reference_id ?? null,
+              company_id      : session.metadata?.company_id ?? null,
+              stripe_payment_id: paymentId,
+              amount_eur      : amountEur,
+              ...legacyOrderFields(amountEur, serviceName),
+              currency        : session.currency?.toUpperCase() ?? 'EUR',
+              status          : 'paid',
+              service_slugs   : session.metadata?.service_slugs ?? session.metadata?.service_slug ?? null,
+              metadata        : catalogOrderMetadata,
+            })
+            .select('id')
+            .single();
 
-      // ── Sync Stripe-collected billing data back into profiles (best-effort, non-blocking) ──
-      if (session.client_reference_id) {
-        try {
-          const details = session.customer_details as {
-            address?: { line1?: string | null; city?: string | null; postal_code?: string | null; state?: string | null; country?: string | null } | null;
-            tax_ids?: Array<{ type: string; value: string | null }> | null;
-          } | null;
-          const addr = details?.address;
-          const taxIdEntry = details?.tax_ids?.[0];
-
-          const { data: currentProfile } = await supabaseAdmin
-            .from('profiles')
-            .select('full_name,phone,client_type,tax_id,address,city,postal_code,province,billing_country,habitual_address,habitual_city,habitual_postal_code')
-            .eq('id', session.client_reference_id)
-            .maybeSingle();
-
-          const profileUpdates: Record<string, unknown> = {};
-          if (addr?.line1)       profileUpdates.address = addr.line1;
-          if (addr?.city)        profileUpdates.city = addr.city;
-          if (addr?.postal_code) profileUpdates.postal_code = addr.postal_code;
-          if (addr?.state)       profileUpdates.province = addr.state;
-          if (addr?.country)     profileUpdates.billing_country = addr.country;
-          if (taxIdEntry?.value) profileUpdates.tax_id = taxIdEntry.value;
-
-          if (Object.keys(profileUpdates).length > 0 && currentProfile) {
-            const merged = { ...currentProfile, ...profileUpdates };
-            const readiness = computeProfileReadiness(merged);
-
-            await supabaseAdmin
-              .from('profiles')
-              .update({
-                ...profileUpdates,
-                profile_completed: readiness.profileCompleted,
-                billing_ready: readiness.billingReady,
-                habitual_address_ready: readiness.habitualAddressReady,
-                updated_at: new Date().toISOString(),
-              })
-              .eq('id', session.client_reference_id);
-          }
-        } catch (err) {
-          console.error('[webhook] profile billing sync failed:', err);
-        }
-      }
-
-      if (customerEmail) {
-        const slugsRaw = session.metadata?.service_slugs ?? session.metadata?.service_slug ?? '';
-        const slugList = slugsRaw.split(',').map((s: string) => s.trim());
-        const holdedPackageSlugs = ['holded-pack-starter', 'holded-migracion-sin-inventario', 'holded-migracion-con-inventario'];
-        const isHoldedMigration = slugList.some((s: string) => holdedPackageSlugs.includes(s));
-        const isHoldedFormacion = slugList.includes('holded-modulo-formacion');
-        const calendlyOnboarding = getCalOnboardingUrl() ?? '';
-        const calendlyFormacion = getCalFormacionUrl() ?? '';
-
-        if (isHoldedMigration) {
-          const packageName = serviceName;
-          const tpl = holdedMigrationConfirmed(customerName, packageName, calendlyOnboarding, calendlyFormacion);
-          await sendEmail({
-            to: customerEmail,
-            eventType: 'holded.migration.confirmed',
-            ...tpl,
-            metadata: { session_id: session.id, package_name: packageName }
-          });
-        } else if (isHoldedFormacion) {
-          const tpl = holdedFormacionConfirmed(customerName, calendlyFormacion);
-          await sendEmail({
-            to: customerEmail,
-            eventType: 'holded.formacion.confirmed',
-            ...tpl,
-            metadata: { session_id: session.id }
-          });
+          catalogOrderId = requireCreatedOrderId('catalog', catalogOrderError, newCatalogOrder?.id);
         } else {
-          const tpl = servicePaymentConfirmed(customerName, amountEur, serviceName);
-          await sendEmail({
-            to: customerEmail,
-            eventType: 'service.payment.confirmed',
-            ...tpl,
-            metadata: {
-              session_id: session.id,
-              service_slug: session.metadata?.service_slug ?? session.metadata?.service_slugs ?? null
+          catalogOrderId = existingCatalogOrder.id;
+          catalogOrderMetadata = (existingCatalogOrder.metadata ?? catalogOrderMetadata) as Record<string, unknown>;
+        }
+
+        if (session.client_reference_id) {
+          try {
+            const details = session.customer_details as {
+              address?: { line1?: string | null; city?: string | null; postal_code?: string | null; state?: string | null; country?: string | null } | null;
+              tax_ids?: Array<{ type: string; value: string | null }> | null;
+            } | null;
+            const addr = details?.address;
+            const taxIdEntry = details?.tax_ids?.[0];
+
+            const { data: currentProfile } = await supabaseAdmin
+              .from('profiles')
+              .select('full_name,phone,client_type,tax_id,address,city,postal_code,province,billing_country,habitual_address,habitual_city,habitual_postal_code')
+              .eq('id', session.client_reference_id)
+              .maybeSingle();
+
+            const profileUpdates: Record<string, unknown> = {};
+            if (addr?.line1)       profileUpdates.address = addr.line1;
+            if (addr?.city)        profileUpdates.city = addr.city;
+            if (addr?.postal_code) profileUpdates.postal_code = addr.postal_code;
+            if (addr?.state)       profileUpdates.province = addr.state;
+            if (addr?.country)     profileUpdates.billing_country = addr.country;
+            if (taxIdEntry?.value) profileUpdates.tax_id = taxIdEntry.value;
+
+            if (Object.keys(profileUpdates).length > 0 && currentProfile) {
+              const merged = { ...currentProfile, ...profileUpdates };
+              const readiness = computeProfileReadiness(merged);
+
+              await supabaseAdmin
+                .from('profiles')
+                .update({
+                  ...profileUpdates,
+                  profile_completed: readiness.profileCompleted,
+                  billing_ready: readiness.billingReady,
+                  habitual_address_ready: readiness.habitualAddressReady,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', session.client_reference_id);
             }
-          });
+          } catch (err) {
+            console.error('[webhook] profile billing sync failed:', err);
+          }
         }
 
-        // ── Notify admins: new catalog/cart payment (email + push) ──
-        const adminEmails = getAdminEmails();
-        if (adminEmails.length) {
-          const adminTpl = servicePaymentConfirmedAdmin(customerName, customerEmail, amountEur, serviceName);
-          sendEmail({
-            to: adminEmails,
-            eventType: 'service.payment.confirmed.admin',
-            ...adminTpl,
-            metadata: { session_id: session.id, product_type: productType }
-          }).catch((err) => {
-            console.error('[webhook] admin payment email failed:', err);
-          });
-        }
-        notifyAdmins({
-          title: `💰 Pago recibido — ${customerName}`,
-          body:  `${serviceName.slice(0, 60)} · €${amountEur.toFixed(0)}`,
-          url:   `/admin/pagos`,
-          tag:   `catalog-payment-${session.id}`,
-        }).catch(() => {});
+        if (customerEmail) {
+          const slugsRaw = session.metadata?.service_slugs ?? session.metadata?.service_slug ?? '';
+          const slugList = slugsRaw.split(',').map((s: string) => s.trim());
+          const holdedPackageSlugs = ['holded-pack-starter', 'holded-migracion-sin-inventario', 'holded-migracion-con-inventario', 'holded-migracion-laboral'];
+          const isHoldedMigration = slugList.some((s: string) => holdedPackageSlugs.includes(s));
+          const isHoldedFormacion = slugList.includes('holded-modulo-formacion');
+          const calendlyOnboarding = getCalOnboardingUrl() ?? '';
+          const calendlyFormacion = getCalFormacionUrl() ?? '';
 
-        const catalogJobId = await enqueueHoldedSync(supabaseAdmin, 'sync_order_holded', {
-          clientName: customerName, clientEmail: customerEmail,
-          description: serviceName, amountEur,
-          orderId: catalogOrderId ?? session.id, localEntity: 'orders',
-        });
-        await startHoldedJob(supabaseAdmin, catalogJobId);
-        syncOrderToHolded({
-          clientName: customerName,
-          clientEmail: customerEmail,
-          description: serviceName,
-          amountEur,
-          orderId: catalogOrderId ?? session.id,
-          localEntity: 'orders'
-        }).then((result) => {
-          void resolveHoldedJob(supabaseAdmin, catalogJobId, result.error ? 'failed' : 'success', result.error);
-          updateOrderHoldedResult(supabaseAdmin, catalogOrderId, result, catalogOrderMetadata).catch((err) => {
-            console.error('[webhook] holded trace update (catalog) failed:', err);
-          });
-        }).catch((err) => {
-          console.error('[webhook] holded sync (catalog) failed:', err);
-          void resolveHoldedJob(supabaseAdmin, catalogJobId, 'failed', err instanceof Error ? err.message : String(err));
-          updateOrderHoldedResult(
-            supabaseAdmin,
-            catalogOrderId,
-            { contactId: null, invoiceId: null, syncEventId: null, error: err instanceof Error ? err.message : String(err) },
-            catalogOrderMetadata
-          ).catch(() => {});
-        });
-      }
-    }
+          if (isHoldedMigration) {
+            const packageName = serviceName;
+            const tpl = holdedMigrationConfirmed(customerName, packageName, calendlyOnboarding, calendlyFormacion);
+            await sendEmail({
+              to: customerEmail,
+              eventType: 'holded.migration.confirmed',
+              ...tpl,
+              metadata: { session_id: session.id, package_name: packageName }
+            });
+          } else if (isHoldedFormacion) {
+            const tpl = holdedFormacionConfirmed(customerName, calendlyFormacion);
+            await sendEmail({
+              to: customerEmail,
+              eventType: 'holded.formacion.confirmed',
+              ...tpl,
+              metadata: { session_id: session.id }
+            });
+          } else {
+            const tpl = servicePaymentConfirmed(customerName, amountEur, serviceName);
+            await sendEmail({
+              to: customerEmail,
+              eventType: 'service.payment.confirmed',
+              ...tpl,
+              metadata: {
+                session_id: session.id,
+                service_slug: session.metadata?.service_slug ?? session.metadata?.service_slugs ?? null
+              }
+            });
+          }
 
-    if (productType === 'holded' || productType === 'holded_formacion') {
-      const customerEmail = session.customer_email ?? (session.customer_details as { email?: string } | null)?.email;
-      const customerName =
-        (session.customer_details as { name?: string } | null)?.name ??
-        customerEmail?.split('@')[0] ??
-        'Cliente';
+          const adminEmails = getAdminEmails();
+          if (adminEmails.length) {
+            const adminTpl = servicePaymentConfirmedAdmin(customerName, customerEmail, amountEur, serviceName);
+            sendEmail({
+              to: adminEmails,
+              eventType: 'service.payment.confirmed.admin',
+              ...adminTpl,
+              metadata: { session_id: session.id, product_type: productType }
+            }).catch((err) => {
+              console.error('[webhook] admin payment email failed:', err);
+            });
+          }
+          notifyAdmins({
+            title: `💰 Pago recibido — ${customerName}`,
+            body:  `${serviceName.slice(0, 60)} · €${amountEur.toFixed(0)}`,
+            url:   `/admin/pagos`,
+            tag:   `catalog-payment-${session.id}`,
+          }).catch(() => {});
 
-      if (customerEmail) {
-        const calendlyOnboarding = getCalOnboardingUrl() ?? '';
-        const calendlyFormacion = getCalFormacionUrl() ?? '';
-        const holdedAmountEur = Number(session.amount_total ?? 0) / 100;
-        if (productType === 'holded') {
-          const packageName = session.metadata?.package_name ?? 'Paquete Holded';
-          const tpl = holdedMigrationConfirmed(customerName, packageName, calendlyOnboarding, calendlyFormacion);
-          await sendEmail({
-            to: customerEmail,
-            eventType: 'holded.migration.confirmed',
-            ...tpl,
-            metadata: { session_id: session.id, package_name: packageName }
-          });
-          // IMP-005: queue first, then fire-and-forget
-          void enqueueHoldedSync(supabaseAdmin, 'sync_holded_migration', {
+          const catalogJobId = await enqueueHoldedSync(supabaseAdmin, 'sync_order_holded', {
             clientName: customerName, clientEmail: customerEmail,
-            description: packageName, amountEur: holdedAmountEur,
-            orderId: session.id, localEntity: 'stripe_checkout_sessions',
-          }).then((migJobId) => {
-            startHoldedJob(supabaseAdmin, migJobId).then(() => syncOrderToHolded({
+            description: serviceName, amountEur,
+            orderId: catalogOrderId ?? session.id, localEntity: 'orders',
+          });
+          await startHoldedJob(supabaseAdmin, catalogJobId);
+          syncOrderToHolded({
+            clientName: customerName,
+            clientEmail: customerEmail,
+            description: serviceName,
+            amountEur,
+            orderId: catalogOrderId ?? session.id,
+            localEntity: 'orders'
+          }).then((result) => {
+            void resolveHoldedJob(supabaseAdmin, catalogJobId, result.error ? 'failed' : 'success', result.error);
+            updateOrderHoldedResult(supabaseAdmin, catalogOrderId, result, catalogOrderMetadata).catch((err) => {
+              console.error('[webhook] holded trace update (catalog) failed:', err);
+            });
+          }).catch((err) => {
+            console.error('[webhook] holded sync (catalog) failed:', err);
+            void resolveHoldedJob(supabaseAdmin, catalogJobId, 'failed', err instanceof Error ? err.message : String(err));
+            updateOrderHoldedResult(
+              supabaseAdmin,
+              catalogOrderId,
+              { contactId: null, invoiceId: null, syncEventId: null, error: err instanceof Error ? err.message : String(err) },
+              catalogOrderMetadata
+            ).catch(() => {});
+          });
+        }
+      }
+
+      if (productType === 'holded' || productType === 'holded_formacion') {
+        const customerEmail = session.customer_email ?? (session.customer_details as { email?: string } | null)?.email;
+        const customerName =
+          (session.customer_details as { name?: string } | null)?.name ??
+          customerEmail?.split('@')[0] ??
+          'Cliente';
+
+        if (customerEmail) {
+          const calendlyOnboarding = getCalOnboardingUrl() ?? '';
+          const calendlyFormacion = getCalFormacionUrl() ?? '';
+          const holdedAmountEur = Number(session.amount_total ?? 0) / 100;
+          if (productType === 'holded') {
+            const packageName = session.metadata?.package_name ?? 'Paquete Holded';
+            const tpl = holdedMigrationConfirmed(customerName, packageName, calendlyOnboarding, calendlyFormacion);
+            await sendEmail({
+              to: customerEmail,
+              eventType: 'holded.migration.confirmed',
+              ...tpl,
+              metadata: { session_id: session.id, package_name: packageName }
+            });
+            void enqueueHoldedSync(supabaseAdmin, 'sync_holded_migration', {
               clientName: customerName, clientEmail: customerEmail,
               description: packageName, amountEur: holdedAmountEur,
               orderId: session.id, localEntity: 'stripe_checkout_sessions',
-            })).then((result) => resolveHoldedJob(supabaseAdmin, migJobId, result.error ? 'failed' : 'success', result.error))
-              .catch((err) => {
-                console.error('[webhook] holded sync (migration) failed:', err);
-                return resolveHoldedJob(supabaseAdmin, migJobId, 'failed', err instanceof Error ? err.message : String(err));
-              });
-          });
-        } else {
-          const tpl = holdedFormacionConfirmed(customerName, calendlyFormacion);
-          await sendEmail({
-            to: customerEmail,
-            eventType: 'holded.formacion.confirmed',
-            ...tpl,
-            metadata: { session_id: session.id }
-          });
-          // IMP-005: queue first, then fire-and-forget
-          void enqueueHoldedSync(supabaseAdmin, 'sync_holded_formacion', {
-            clientName: customerName, clientEmail: customerEmail,
-            description: 'Formación EXPERT — sesión 2 h', amountEur: holdedAmountEur,
-            orderId: session.id, localEntity: 'stripe_checkout_sessions',
-          }).then((formJobId) => {
-            startHoldedJob(supabaseAdmin, formJobId).then(() => syncOrderToHolded({
+            }).then((migJobId) => {
+              startHoldedJob(supabaseAdmin, migJobId).then(() => syncOrderToHolded({
+                clientName: customerName, clientEmail: customerEmail,
+                description: packageName, amountEur: holdedAmountEur,
+                orderId: session.id, localEntity: 'stripe_checkout_sessions',
+              })).then((result) => resolveHoldedJob(supabaseAdmin, migJobId, result.error ? 'failed' : 'success', result.error))
+                .catch((err) => {
+                  console.error('[webhook] holded sync (migration) failed:', err);
+                  return resolveHoldedJob(supabaseAdmin, migJobId, 'failed', err instanceof Error ? err.message : String(err));
+                });
+            });
+          } else {
+            const tpl = holdedFormacionConfirmed(customerName, calendlyFormacion);
+            await sendEmail({
+              to: customerEmail,
+              eventType: 'holded.formacion.confirmed',
+              ...tpl,
+              metadata: { session_id: session.id }
+            });
+            void enqueueHoldedSync(supabaseAdmin, 'sync_holded_formacion', {
               clientName: customerName, clientEmail: customerEmail,
               description: 'Formación EXPERT — sesión 2 h', amountEur: holdedAmountEur,
               orderId: session.id, localEntity: 'stripe_checkout_sessions',
-            })).then((result) => resolveHoldedJob(supabaseAdmin, formJobId, result.error ? 'failed' : 'success', result.error))
-              .catch((err) => {
-                console.error('[webhook] holded sync (formacion) failed:', err);
-                return resolveHoldedJob(supabaseAdmin, formJobId, 'failed', err instanceof Error ? err.message : String(err));
-              });
-          });
+            }).then((formJobId) => {
+              startHoldedJob(supabaseAdmin, formJobId).then(() => syncOrderToHolded({
+                clientName: customerName, clientEmail: customerEmail,
+                description: 'Formación EXPERT — sesión 2 h', amountEur: holdedAmountEur,
+                orderId: session.id, localEntity: 'stripe_checkout_sessions',
+              })).then((result) => resolveHoldedJob(supabaseAdmin, formJobId, result.error ? 'failed' : 'success', result.error))
+                .catch((err) => {
+                  console.error('[webhook] holded sync (formacion) failed:', err);
+                  return resolveHoldedJob(supabaseAdmin, formJobId, 'failed', err instanceof Error ? err.message : String(err));
+                });
+            });
+          }
+        }
+      }
+
+      if (session.mode === 'subscription') {
+        const userId = session.client_reference_id ?? session.metadata?.user_id ?? null;
+        const companyId = session.metadata?.company_id ?? null;
+        const subscriptionId =
+          typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
+
+        const { error: checkoutStatusError } = await supabaseAdmin
+          .from('checkout_sessions')
+          .update({ status: 'completed', updated_at: new Date().toISOString() })
+          .eq('stripe_session_id', session.id);
+        if (checkoutStatusError) throw new Error(`Could not mark checkout ${session.id} completed: ${checkoutStatusError.message}`);
+
+        if (subscriptionId) {
+          const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+          await upsertSubscriptionFromStripe(supabaseAdmin, subscription, userId, companyId);
+        } else if (userId && session.customer) {
+          const customerId =
+            typeof session.customer === 'string' ? session.customer : session.customer.id;
+          await linkStripeCustomer(supabaseAdmin, userId, customerId, companyId);
         }
       }
     }
 
-    if (session.mode === 'subscription') {
-      const userId = session.client_reference_id ?? session.metadata?.user_id ?? null;
-      const companyId = session.metadata?.company_id ?? null;
-      const subscriptionId =
-        typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
+    if (event.type === 'checkout.session.expired') {
+      const session = event.data.object as Stripe.Checkout.Session;
+      if (session.mode === 'subscription') {
+        const { error: checkoutStatusError } = await supabaseAdmin
+          .from('checkout_sessions')
+          .update({ status: 'expired', updated_at: new Date().toISOString() })
+          .eq('stripe_session_id', session.id);
+        if (checkoutStatusError) throw new Error(`Could not mark checkout ${session.id} expired: ${checkoutStatusError.message}`);
+      }
+    }
 
-      const { error: checkoutStatusError } = await supabaseAdmin
-        .from('checkout_sessions')
-        .update({ status: 'completed', updated_at: new Date().toISOString() })
-        .eq('stripe_session_id', session.id);
-      if (checkoutStatusError) throw new Error(`Could not mark checkout ${session.id} completed: ${checkoutStatusError.message}`);
+    if (event.type === 'checkout.session.async_payment_succeeded') {
+      const session = event.data.object as Stripe.Checkout.Session;
+      if (session.metadata?.quote_id) {
+        await fulfillQuotePayment(supabaseAdmin, session);
+      } else if (session.metadata?.product_type === 'academy_certification') {
+        await fulfillAcademyCertification(supabaseAdmin, session);
+      } else if (session.metadata?.product_type === 'academy_program') {
+        await fulfillAcademyProgram(supabaseAdmin, session);
+      }
+    }
+
+    if (event.type === 'customer.subscription.created') {
+      const sub = event.data.object as Stripe.Subscription;
+      const subscriptionRecord = await upsertSubscriptionFromStripe(supabaseAdmin, sub);
+      if (subscriptionRecord && isActivatedSubscriptionStatus(sub.status)) {
+        await handleSubscriptionActivation(supabaseAdmin, sub, subscriptionRecord);
+      }
+    }
+
+    if (event.type === 'customer.subscription.updated') {
+      const sub = event.data.object as Stripe.Subscription;
+      const prevAttributes = event.data.previous_attributes as Record<string, unknown> | undefined;
+      const prevStatus = prevAttributes?.status as string | undefined;
+
+      const subscriptionRecord = await upsertSubscriptionFromStripe(supabaseAdmin, sub);
+      const becameActivated = isActivatedSubscriptionStatus(sub.status) && !isActivatedSubscriptionStatus(prevStatus);
+      if (subscriptionRecord && becameActivated) {
+        await handleSubscriptionActivation(supabaseAdmin, sub, subscriptionRecord);
+      }
+
+      if (sub.status === 'past_due' && prevStatus !== 'past_due') {
+        const { data: dbSub } = await supabaseAdmin
+          .from('subscriptions')
+          .select('client_id,plan_name')
+          .eq('stripe_subscription_id', sub.id)
+          .maybeSingle();
+
+        const clientId = subscriptionRecord?.clientId ?? dbSub?.client_id;
+        const planName = subscriptionRecord?.planName ?? dbSub?.plan_name ?? 'Suscripción';
+
+        if (clientId) {
+          const clientInfo = await getClientEmail(clientId);
+          if (clientInfo) {
+            const tpl = subscriptionPaymentFailed(clientInfo.name, planName);
+            await sendEmail({
+              to: clientInfo.email,
+              eventType: 'subscription.payment_failed',
+              ...tpl,
+              metadata: { subscription_id: sub.id, company_id: subscriptionRecord?.companyId ?? null }
+            });
+          }
+        }
+      }
+    }
+
+    if (event.type === 'invoice.payment_failed') {
+      const invoice = event.data.object as Stripe.Invoice;
+      const parentSub = invoice.parent?.subscription_details?.subscription;
+      const subscriptionId = typeof parentSub === 'string' ? parentSub : parentSub?.id;
 
       if (subscriptionId) {
-        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-        await upsertSubscriptionFromStripe(supabaseAdmin, subscription, userId, companyId);
-      } else if (userId && session.customer) {
-        const customerId =
-          typeof session.customer === 'string' ? session.customer : session.customer.id;
-        await linkStripeCustomer(supabaseAdmin, userId, customerId, companyId);
-      }
-    }
-  }
+        const { data: dbSub } = await supabaseAdmin
+          .from('subscriptions')
+          .select('client_id,plan_name,company_id')
+          .eq('stripe_subscription_id', subscriptionId)
+          .maybeSingle();
 
-  if (event.type === 'checkout.session.expired') {
-    const session = event.data.object as Stripe.Checkout.Session;
-    if (session.mode === 'subscription') {
-      const { error: checkoutStatusError } = await supabaseAdmin
-        .from('checkout_sessions')
-        .update({ status: 'expired', updated_at: new Date().toISOString() })
-        .eq('stripe_session_id', session.id);
-      if (checkoutStatusError) throw new Error(`Could not mark checkout ${session.id} expired: ${checkoutStatusError.message}`);
-    }
-  }
-
-  // Delayed payment methods (e.g. SEPA debit) can leave a Checkout Session
-  // "completed" but not yet paid — Stripe confirms success later via this
-  // event. Both academy flows use fulfillment helpers that are safe to call
-  // from either event (idempotent on orders.stripe_payment_id).
-  if (event.type === 'checkout.session.async_payment_succeeded') {
-    const session = event.data.object as Stripe.Checkout.Session;
-    if (session.metadata?.product_type === 'academy_certification') {
-      await fulfillAcademyCertification(supabaseAdmin, session);
-    } else if (session.metadata?.product_type === 'academy_program') {
-      await fulfillAcademyProgram(supabaseAdmin, session);
-    }
-  }
-
-  if (event.type === 'customer.subscription.created') {
-    const sub = event.data.object as Stripe.Subscription;
-    const subscriptionRecord = await upsertSubscriptionFromStripe(supabaseAdmin, sub);
-    if (subscriptionRecord && isActivatedSubscriptionStatus(sub.status)) {
-      await handleSubscriptionActivation(supabaseAdmin, sub, subscriptionRecord);
-    }
-  }
-
-  if (event.type === 'customer.subscription.updated') {
-    const sub = event.data.object as Stripe.Subscription;
-    const prevAttributes = event.data.previous_attributes as Record<string, unknown> | undefined;
-    const prevStatus = prevAttributes?.status as string | undefined;
-
-    const subscriptionRecord = await upsertSubscriptionFromStripe(supabaseAdmin, sub);
-    const becameActivated = isActivatedSubscriptionStatus(sub.status) && !isActivatedSubscriptionStatus(prevStatus);
-    if (subscriptionRecord && becameActivated) {
-      await handleSubscriptionActivation(supabaseAdmin, sub, subscriptionRecord);
-    }
-
-    if (sub.status === 'past_due' && prevStatus !== 'past_due') {
-      const { data: dbSub } = await supabaseAdmin
-        .from('subscriptions')
-        .select('client_id,plan_name')
-        .eq('stripe_subscription_id', sub.id)
-        .maybeSingle();
-
-      const clientId = subscriptionRecord?.clientId ?? dbSub?.client_id;
-      const planName = subscriptionRecord?.planName ?? dbSub?.plan_name ?? 'Suscripción';
-
-      if (clientId) {
-        const clientInfo = await getClientEmail(clientId);
-        if (clientInfo) {
-          const tpl = subscriptionPaymentFailed(clientInfo.name, planName);
-          await sendEmail({
-            to: clientInfo.email,
-            eventType: 'subscription.payment_failed',
-            ...tpl,
-            metadata: { subscription_id: sub.id, company_id: subscriptionRecord?.companyId ?? null }
-          });
+        if (dbSub?.client_id) {
+          const clientInfo = await getClientEmail(dbSub.client_id);
+          if (clientInfo) {
+            const tpl = subscriptionPaymentFailed(clientInfo.name, dbSub.plan_name ?? 'Suscripción');
+            await sendEmail({
+              to: clientInfo.email,
+              eventType: 'subscription.payment_failed',
+              ...tpl,
+              metadata: { subscription_id: subscriptionId, invoice_id: invoice.id, company_id: dbSub.company_id ?? null }
+            });
+          }
         }
       }
     }
-  }
 
-  if (event.type === 'invoice.payment_failed') {
-    // customer.subscription.updated only notifies on the *first* transition
-    // into past_due; Stripe also fires this event on each dunning retry
-    // without necessarily changing subscription status again, so it needs
-    // its own notification path or later retries go silent.
-    const invoice = event.data.object as Stripe.Invoice;
-    const parentSub = invoice.parent?.subscription_details?.subscription;
-    const subscriptionId = typeof parentSub === 'string' ? parentSub : parentSub?.id;
-
-    if (subscriptionId) {
-      const { data: dbSub } = await supabaseAdmin
+    if (event.type === 'customer.subscription.deleted') {
+      const sub = event.data.object as Stripe.Subscription;
+      const { error: deleteUpdateError } = await supabaseAdmin
         .from('subscriptions')
-        .select('client_id,plan_name,company_id')
-        .eq('stripe_subscription_id', subscriptionId)
-        .maybeSingle();
-
-      if (dbSub?.client_id) {
-        const clientInfo = await getClientEmail(dbSub.client_id);
-        if (clientInfo) {
-          const tpl = subscriptionPaymentFailed(clientInfo.name, dbSub.plan_name ?? 'Suscripción');
-          await sendEmail({
-            to: clientInfo.email,
-            eventType: 'subscription.payment_failed',
-            ...tpl,
-            metadata: { subscription_id: subscriptionId, invoice_id: invoice.id, company_id: dbSub.company_id ?? null }
-          });
-        }
+        .update({
+          status: 'canceled',
+          canceled_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('stripe_subscription_id', sub.id);
+      if (deleteUpdateError) {
+        throw new Error(`Could not persist canceled Stripe subscription ${sub.id}: ${deleteUpdateError.message}`);
       }
     }
-  }
-
-  if (event.type === 'customer.subscription.deleted') {
-    const sub = event.data.object as Stripe.Subscription;
-    const { error: deleteUpdateError } = await supabaseAdmin
-      .from('subscriptions')
-      .update({
-        status: 'canceled',
-        canceled_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
-      .eq('stripe_subscription_id', sub.id);
-    if (deleteUpdateError) {
-      throw new Error(`Could not persist canceled Stripe subscription ${sub.id}: ${deleteUpdateError.message}`);
-    }
-  }
 
     const { error: completeError } = await supabaseAdmin.rpc('complete_stripe_event', { p_event_id: event.id });
     if (completeError) throw new Error(`Could not complete Stripe event: ${completeError.message}`);

@@ -8,15 +8,22 @@ import { getRandomFunFact } from '@/lib/utils/fun-facts';
 import { generateContractHtml, contractToBuffer } from '@/lib/utils/contract';
 import { getPublicAppUrl } from '@/lib/utils/app-url';
 import { syncQuoteAsEstimate } from '@/lib/integrations/holded';
+import { quoteItemsSubtotal, resolveQuoteItems } from '@/lib/quotes/quote-items';
 
 const quoteSchema = z.object({
   clientEmail: z.string().email('Email de cliente inválido'),
   companyId: z.string().uuid().nullable().optional(),
   title: z.string().min(3, 'Título demasiado corto'),
   description: z.string().min(5, 'Descripción demasiado corta'),
-  amountEur: z.number().positive('El importe debe ser positivo'),
+  amountEur: z.number().positive('El importe debe ser positivo').optional(),
+  items: z.array(z.object({
+    serviceSlug: z.string().min(1),
+    quantity: z.number().int().positive().optional(),
+  })).min(1).max(20).optional(),
   expiresInDays: z.number().int().min(1).max(90).default(14),
   docsChecklist: z.array(z.string()).default([])
+}).refine((value) => Boolean(value.items?.length || value.amountEur), {
+  message: 'Indica un importe o añade servicios al presupuesto.'
 });
 
 async function requireAdmin(request: NextRequest): Promise<string | null> {
@@ -43,7 +50,24 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: parsed.error.issues[0]?.message ?? 'Datos inválidos' }, { status: 400 });
     }
 
-    const { clientEmail, title, description, amountEur, expiresInDays, docsChecklist } = parsed.data;
+    const { clientEmail, title, description, expiresInDays, docsChecklist } = parsed.data;
+    let resolvedItems: ReturnType<typeof resolveQuoteItems> = [];
+    try {
+      resolvedItems = parsed.data.items ? resolveQuoteItems(parsed.data.items) : [];
+    } catch (itemError) {
+      return NextResponse.json({
+        error: itemError instanceof Error ? itemError.message : 'Servicios del presupuesto no válidos.'
+      }, { status: 400 });
+    }
+
+    const amountEur = resolvedItems.length
+      ? quoteItemsSubtotal(resolvedItems)
+      : parsed.data.amountEur!;
+
+    if (resolvedItems.length && parsed.data.amountEur != null && Math.abs(parsed.data.amountEur - amountEur) > 0.001) {
+      return NextResponse.json({ error: 'El importe no coincide con las líneas del catálogo.' }, { status: 400 });
+    }
+
     const adminSupabase = getSupabaseAdmin();
 
     const listData = await listAllAuthUsers();
@@ -64,7 +88,7 @@ export async function POST(request: NextRequest) {
 
     const { data: memberships, error: membershipsError } = await adminSupabase
       .from('profile_companies')
-      .select('company_id,company:companies(id,razon_social,cif_nif,forma_juridica,direccion,ciudad,codigo_postal,email,telefono)')
+      .select('company_id,company:companies(id,razon_social,cif_nif,forma_juridica,direccion,ciudad,codigo_postal,pais,email,telefono,stripe_customer_id)')
       .eq('profile_id', clientId);
     if (membershipsError) {
       return NextResponse.json({ error: 'No se pudieron resolver las entidades del cliente' }, { status: 500 });
@@ -98,8 +122,6 @@ export async function POST(request: NextRequest) {
       ? `${contractingCompany.direccion ?? ''}, ${contractingCompany.ciudad}`.trim().replace(/^,\s*/, '')
       : contractingCompany.direccion ?? null;
 
-    // Rows created below belong exclusively to this request and can be safely
-    // compensated if Stripe/email setup fails before the quote is delivered.
     const { data: lead, error: leadErr } = await adminSupabase
       .from('leads')
       .insert({
@@ -143,29 +165,69 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Error al crear presupuesto' }, { status: 500 });
     }
 
+    if (resolvedItems.length) {
+      const { error: itemInsertError } = await adminSupabase.from('quote_items').insert(
+        resolvedItems.map((item) => ({
+          quote_id: quote.id,
+          service_slug: item.serviceSlug,
+          stripe_price_id: item.stripePriceId,
+          description: item.description,
+          quantity: item.quantity,
+          unit_amount_eur: item.unitAmountEur,
+          tax_behavior: item.taxBehavior,
+          sort_order: item.sortOrder,
+        }))
+      );
+      if (itemInsertError) {
+        console.error('[admin/quotes] quote item insert error:', itemInsertError);
+        await adminSupabase.from('leads').delete().eq('id', lead.id).then(() => {});
+        return NextResponse.json({ error: 'No se pudieron guardar las líneas del presupuesto.' }, { status: 500 });
+      }
+    }
+
     const stripe = getStripeClient();
     const appUrl = getPublicAppUrl();
 
     let session;
     try {
+      const itemMetadata: Record<string, string> = {};
+      if (resolvedItems.length) {
+        itemMetadata.service_slugs = resolvedItems.map((item) => item.serviceSlug).join(',').slice(0, 499);
+        itemMetadata.employee_count = String(
+          resolvedItems.find((item) => item.serviceSlug === 'holded-migracion-laboral')?.quantity ?? ''
+        );
+      }
+
       session = await stripe.checkout.sessions.create({
         mode: 'payment',
         client_reference_id: quote.id,
-        customer_email: clientEmail,
-        line_items: [
-          {
-            price_data: {
-              currency: 'eur',
-              unit_amount: Math.round(amountEur * 100),
-              product_data: { name: toStripeAscii(title), description: toStripeAscii(description) }
-            },
-            quantity: 1
-          }
-        ],
-        metadata: { quote_id: quote.id, company_id: companyId, product_type: 'presupuesto' },
+        customer: contractingCompany.stripe_customer_id ?? undefined,
+        customer_email: contractingCompany.stripe_customer_id ? undefined : clientEmail,
+        ...(contractingCompany.stripe_customer_id ? { customer_update: { address: 'auto' as const, name: 'auto' as const } } : {}),
+        automatic_tax: { enabled: true },
+        billing_address_collection: 'required',
+        tax_id_collection: { enabled: true, required: 'if_supported' },
+        line_items: resolvedItems.length
+          ? resolvedItems.map((item) => ({ price: item.stripePriceId, quantity: item.quantity }))
+          : [{
+              price_data: {
+                currency: 'eur',
+                unit_amount: Math.round(amountEur * 100),
+                tax_behavior: 'exclusive',
+                product_data: { name: toStripeAscii(title), description: toStripeAscii(description) }
+              },
+              quantity: 1
+            }],
+        metadata: {
+          quote_id: quote.id,
+          company_id: companyId,
+          product_type: 'presupuesto',
+          ...itemMetadata,
+        },
         success_url: `${appUrl}/dashboard/expedientes?pago=ok`,
-        cancel_url: `${appUrl}/dashboard?pago=cancelado`,
-        expires_at: Math.floor(Date.now() / 1000) + expiresInDays * 86400
+        cancel_url: `${appUrl}/dashboard/presupuestos`,
+        expires_at: Math.floor(Date.now() / 1000) + expiresInDays * 86400,
+        locale: 'es',
       });
     } catch (stripeCreateError) {
       console.error('[admin/quotes] Stripe checkout creation failed:', stripeCreateError);
@@ -228,8 +290,6 @@ export async function POST(request: NextRequest) {
       }
 
       if (!expireFailed) {
-        // lead -> quotes is ON DELETE CASCADE. Both rows were created by this request,
-        // and no downstream work has started yet, so this compensation is isolated.
         const { error: cleanupError } = await adminSupabase.from('leads').delete().eq('id', lead.id);
         if (cleanupError) {
           console.error('[admin/quotes] failed to clean request-created quote after email failure:', cleanupError);
@@ -256,7 +316,13 @@ export async function POST(request: NextRequest) {
       action: 'quote.sent',
       entity: 'quotes',
       entity_id: quote.id,
-      metadata: { client_email: clientEmail, company_id: companyId, amount_eur: amountEur, stripe_session: session.id }
+      metadata: {
+        client_email: clientEmail,
+        company_id: companyId,
+        amount_eur: amountEur,
+        stripe_session: session.id,
+        service_slugs: resolvedItems.map((item) => item.serviceSlug),
+      }
     }).then(() => {});
 
     syncQuoteAsEstimate({
@@ -268,7 +334,7 @@ export async function POST(request: NextRequest) {
       amountEur,
     }).catch((e) => console.error('[admin/quotes] holded estimate sync:', e));
 
-    return NextResponse.json({ ok: true, quoteId: quote.id, stripeUrl: session.url, companyId });
+    return NextResponse.json({ ok: true, quoteId: quote.id, stripeUrl: session.url, companyId, amountEur });
   } catch (err) {
     console.error('[admin/quotes] error:', err);
     return NextResponse.json({ error: 'Error interno del servidor' }, { status: 500 });
