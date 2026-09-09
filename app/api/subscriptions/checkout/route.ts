@@ -5,6 +5,13 @@ import { createServerSupabaseClient, getSupabaseAdmin } from '@/lib/integrations
 import { getPublicAppUrl } from '@/lib/utils/app-url';
 import { isCompanyBillingReady, missingCompanyBillingFields } from '@/lib/companies/billing-readiness';
 import { resolveCompanyCommercialCoverage } from '@/lib/subscriptions/company-commercial-coverage';
+import {
+  claimSubscriptionCheckout,
+  expireSubscriptionCheckoutClaim,
+  finalizeSubscriptionCheckoutClaim,
+  flagSubscriptionCheckoutClaimReview,
+  newSubscriptionCheckoutOwnerToken,
+} from '@/lib/subscriptions/checkout-claim';
 
 const bodySchema = z.object({
   priceId: z.string().min(1),
@@ -145,6 +152,93 @@ export async function POST(request: NextRequest) {
     const stripeCustomerId = company.stripe_customer_id ?? null;
     const stripe = getStripeClient();
     const appUrl = getPublicAppUrl();
+    const ownerToken = newSubscriptionCheckoutOwnerToken();
+
+    let claim;
+    try {
+      claim = await claimSubscriptionCheckout(admin, {
+        userId: user.id,
+        companyId,
+        priceId,
+        ownerToken,
+      });
+    } catch (claimError) {
+      console.error('[subscriptions/checkout] failed to acquire atomic claim:', claimError);
+      return NextResponse.json(
+        { error: 'No se pudo reservar de forma segura la contratación. Inténtalo de nuevo.', code: 'checkout_claim_error' },
+        { status: 500 }
+      );
+    }
+
+    if (!claim.acquired) {
+      if (claim.state === 'open' && claim.stripeSessionId) {
+        try {
+          const existingSession = await stripe.checkout.sessions.retrieve(claim.stripeSessionId);
+          if (existingSession.status === 'open' && existingSession.url) {
+            return NextResponse.json({
+              url: existingSession.url,
+              sessionId: existingSession.id,
+              companyId,
+              reused: true,
+            });
+          }
+
+          if (existingSession.status === 'expired' || existingSession.status === 'complete') {
+            const localStatus = existingSession.status === 'complete' ? 'completed' : 'expired';
+            const { error: syncError } = await admin
+              .from('checkout_sessions')
+              .update({ status: localStatus })
+              .eq('stripe_session_id', existingSession.id)
+              .in('status', ['open', 'pending']);
+
+            if (syncError) {
+              console.error('[subscriptions/checkout] failed to reconcile stale checkout:', syncError);
+              return NextResponse.json(
+                { error: 'La contratación anterior requiere revisión antes de crear otra sesión.', code: 'checkout_manual_review' },
+                { status: 409 }
+              );
+            }
+
+            return NextResponse.json(
+              {
+                error: existingSession.status === 'complete'
+                  ? 'La sesión anterior ya se completó y está siendo procesada.'
+                  : 'La sesión anterior estaba caducada. Repite la contratación para generar un enlace nuevo.',
+                code: existingSession.status === 'complete' ? 'checkout_completed' : 'checkout_retry',
+              },
+              { status: 409 }
+            );
+          }
+        } catch (reconcileError) {
+          console.error('[subscriptions/checkout] failed to reconcile existing Stripe session:', reconcileError);
+          return NextResponse.json(
+            { error: 'Hay una contratación previa que no se puede verificar automáticamente.', code: 'checkout_manual_review' },
+            { status: 409 }
+          );
+        }
+      }
+
+      if (claim.state === 'manual_review') {
+        return NextResponse.json(
+          { error: 'La contratación anterior requiere revisión antes de crear otra sesión.', code: 'checkout_manual_review' },
+          { status: 409 }
+        );
+      }
+
+      return NextResponse.json(
+        { error: 'Ya hay una contratación en curso para esta entidad y plan.', code: 'checkout_in_progress' },
+        { status: 409 }
+      );
+    }
+
+    if (!claim.claimId) {
+      console.error('[subscriptions/checkout] acquired claim without claim_id');
+      return NextResponse.json(
+        { error: 'No se pudo reservar de forma segura la contratación.', code: 'checkout_claim_error' },
+        { status: 500 }
+      );
+    }
+
     const entityMetadata = {
       user_id: user.id,
       company_id: companyId,
@@ -153,38 +247,53 @@ export async function POST(request: NextRequest) {
       product_type: 'suscripcion'
     };
 
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      customer: stripeCustomerId ?? undefined,
-      customer_email: stripeCustomerId ? undefined : user.email,
-      client_reference_id: user.id,
-      billing_address_collection: 'required',
-      tax_id_collection: { enabled: true, required: 'if_supported' },
-      automatic_tax: { enabled: true },
-      ...(stripeCustomerId ? { customer_update: { address: 'auto' as const, name: 'auto' as const } } : {}),
-      metadata: entityMetadata,
-      subscription_data: {
-        metadata: {
-          ...entityMetadata,
-          configured_price_id: priceId,
-        }
-      },
-      line_items: [{
-        quantity: 1,
-        price_data: {
-          currency: 'eur',
-          unit_amount: Math.round(configuredPlan.amountEur * 100),
-          tax_behavior: 'exclusive',
-          recurring: { interval: configuredPlan.interval },
-          product_data: {
-            name: toStripeAscii(configuredPlan.name),
-            metadata: { configured_price_id: priceId, billing: configuredPlan.interval },
-          },
+    let session;
+    try {
+      session = await stripe.checkout.sessions.create({
+        mode: 'subscription',
+        customer: stripeCustomerId ?? undefined,
+        customer_email: stripeCustomerId ? undefined : user.email,
+        client_reference_id: user.id,
+        billing_address_collection: 'required',
+        tax_id_collection: { enabled: true, required: 'if_supported' },
+        automatic_tax: { enabled: true },
+        ...(stripeCustomerId ? { customer_update: { address: 'auto' as const, name: 'auto' as const } } : {}),
+        metadata: entityMetadata,
+        subscription_data: {
+          metadata: {
+            ...entityMetadata,
+            configured_price_id: priceId,
+          }
         },
-      }],
-      success_url: `${appUrl}/dashboard/post-compra?origin=subscription`,
-      cancel_url: `${appUrl}/dashboard/suscripciones`
-    });
+        line_items: [{
+          quantity: 1,
+          price_data: {
+            currency: 'eur',
+            unit_amount: Math.round(configuredPlan.amountEur * 100),
+            tax_behavior: 'exclusive',
+            recurring: { interval: configuredPlan.interval },
+            product_data: {
+              name: toStripeAscii(configuredPlan.name),
+              metadata: { configured_price_id: priceId, billing: configuredPlan.interval },
+            },
+          },
+        }],
+        success_url: `${appUrl}/dashboard/post-compra?origin=subscription`,
+        cancel_url: `${appUrl}/dashboard/suscripciones`
+      });
+    } catch (stripeError) {
+      console.error('[subscriptions/checkout] Stripe session creation failed:', stripeError);
+      try {
+        await expireSubscriptionCheckoutClaim(admin, {
+          claimId: claim.claimId,
+          ownerToken,
+          error: 'stripe_session_create_failed',
+        });
+      } catch (claimCleanupError) {
+        console.error('[subscriptions/checkout] failed to release claim after Stripe create error:', claimCleanupError);
+      }
+      return NextResponse.json({ error: 'Error al crear la sesión de pago' }, { status: 502 });
+    }
 
     const { error: persistError } = await admin.from('checkout_sessions').insert({
       stripe_session_id: session.id,
@@ -204,12 +313,79 @@ export async function POST(request: NextRequest) {
 
     if (persistError) {
       console.error('[subscriptions/checkout] checkout persistence failed:', persistError);
+      let stripeExpired = false;
       try {
         await stripe.checkout.sessions.expire(session.id);
+        stripeExpired = true;
       } catch (expireError) {
         console.error('[subscriptions/checkout] failed to expire orphan Stripe session:', expireError);
       }
+
+      try {
+        if (stripeExpired) {
+          await expireSubscriptionCheckoutClaim(admin, {
+            claimId: claim.claimId,
+            ownerToken,
+            error: 'checkout_persistence_failed',
+          });
+        } else {
+          await flagSubscriptionCheckoutClaimReview(admin, {
+            claimId: claim.claimId,
+            ownerToken,
+            error: 'checkout_persistence_failed_and_stripe_expire_failed',
+          });
+        }
+      } catch (claimCleanupError) {
+        console.error('[subscriptions/checkout] failed to reconcile claim after persistence error:', claimCleanupError);
+      }
+
       return NextResponse.json({ error: 'No se pudo registrar de forma segura la sesión de contratación' }, { status: 500 });
+    }
+
+    try {
+      await finalizeSubscriptionCheckoutClaim(admin, {
+        claimId: claim.claimId,
+        ownerToken,
+        stripeSessionId: session.id,
+      });
+    } catch (finalizeError) {
+      console.error('[subscriptions/checkout] failed to finalize checkout claim:', finalizeError);
+
+      let stripeExpired = false;
+      try {
+        await stripe.checkout.sessions.expire(session.id);
+        stripeExpired = true;
+      } catch (expireError) {
+        console.error('[subscriptions/checkout] failed to expire session after claim finalization error:', expireError);
+      }
+
+      if (stripeExpired) {
+        const { error: localExpireError } = await admin
+          .from('checkout_sessions')
+          .update({ status: 'expired' })
+          .eq('stripe_session_id', session.id)
+          .in('status', ['open', 'pending']);
+        if (localExpireError) {
+          console.error('[subscriptions/checkout] failed to mark local session expired:', localExpireError);
+        }
+      }
+
+      try {
+        await flagSubscriptionCheckoutClaimReview(admin, {
+          claimId: claim.claimId,
+          ownerToken,
+          error: stripeExpired
+            ? 'claim_finalize_failed_session_expired'
+            : 'claim_finalize_failed_session_may_be_open',
+        });
+      } catch (reviewError) {
+        console.error('[subscriptions/checkout] failed to flag claim for manual review:', reviewError);
+      }
+
+      return NextResponse.json(
+        { error: 'No se pudo confirmar de forma segura la sesión de contratación.', code: 'checkout_manual_review' },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({ url: session.url, sessionId: session.id, companyId });
