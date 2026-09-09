@@ -89,7 +89,7 @@ export function QuickProfileGate({ priceIds, onCheckoutUrl }: Props) {
         <span className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-[#23364D]/60">
           <Phone className="h-3.5 w-3.5 text-[#D4A017]" /> Telefono
         </span>
-        <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} required disabled={loadingProfile} className={inputCls} placeholder="+34 6XX XXX XXX" />
+        <input type="tel" inputMode="tel" pattern="[+]?[0-9\s().-]{7,20}" title="Introduce un teléfono válido (7-20 dígitos, puede incluir +, espacios o guiones)" value={phone} onChange={(e) => setPhone(e.target.value)} required disabled={loadingProfile} className={inputCls} placeholder="+34 6XX XXX XXX" />
       </label>
       {error && <p role="alert" aria-live="assertive" className="text-xs font-semibold text-red-700">{error}</p>}
       <button

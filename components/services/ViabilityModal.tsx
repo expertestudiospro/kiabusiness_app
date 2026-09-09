@@ -522,6 +522,9 @@ export function ViabilityModal({ check, serviceSlug, onClose }: ViabilityModalPr
                   </label>
                   <input
                     type="tel"
+                    inputMode="tel"
+                    pattern="[+]?[0-9\s().-]{7,20}"
+                    title="Introduce un teléfono válido (7-20 dígitos, puede incluir +, espacios o guiones)"
                     value={personal.phone}
                     onChange={e => setPersonal(p => ({ ...p, phone: e.target.value }))}
                     className="mt-1.5 w-full rounded-xl border border-white/20 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-[#D4A017] focus:outline-none"
@@ -551,7 +554,7 @@ export function ViabilityModal({ check, serviceSlug, onClose }: ViabilityModalPr
                 <span className="text-xs text-white/50 leading-relaxed">
                   Acepto que EXPERT ESTUDIOS PROFESIONALES trate mis datos para evaluar la viabilidad de mi caso,
                   conforme a la{' '}
-                  <a href="/privacidad" className="text-[#D4A017] underline" target="_blank" rel="noopener">
+                  <a href="/privacidad" className="text-[#D4A017] underline" target="_blank" rel="noopener noreferrer">
                     política de privacidad
                   </a>
                   . Puedo ejercer mis derechos RGPD en cualquier momento.

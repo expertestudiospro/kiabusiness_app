@@ -9,6 +9,7 @@ import { FaqSection } from '@/components/site/FaqSection';
 import { getCalAcademyUrl } from '@/lib/utils/cal';
 import { EventTracker } from '@/components/site/EventTracker';
 import { TrackedAnchor } from '@/components/site/TrackedAnchor';
+import { OtherAcademyPrograms } from '@/components/site/OtherAcademyPrograms';
 
 // /academy (index) keeps serving academyPrograms[0] as its own dedicated
 // page — this dynamic route only serves the other programs, so it never
@@ -321,6 +322,9 @@ export default async function AcademyProgramPage({ params }: Props) {
           ) : null}
         </div>
       </section>
+
+      {/* Otros programas de la Academy */}
+      <OtherAcademyPrograms currentSlug={program.slug} />
 
       {/* FAQ */}
       <FaqSection items={program.faqs} />

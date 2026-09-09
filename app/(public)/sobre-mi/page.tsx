@@ -1,57 +1,54 @@
 import type { Metadata } from 'next';
 import Image from 'next/image';
 import Link from 'next/link';
-import { ArrowRight, Award, Briefcase, CheckCircle, GraduationCap, Shield } from 'lucide-react';
+import { ArrowRight, Award, Briefcase, CheckCircle, GraduationCap, Shield, Target, Leaf, Users } from 'lucide-react';
 
 export const metadata: Metadata = {
-  title: 'Sobre mí — Ksenia Ilicheva | EXPERT',
+  title: 'Nosotros — Misión y compromiso | EXPERT',
   description:
-    'Ksenia Ilicheva, asesora fiscal, legal y administrativa en España. Más de 20 años de experiencia, colaboradora social de la AEAT, Red PAE y Holded Solution Partner.',
+    'Conoce a EXPERT: nuestra misión, la responsabilidad corporativa que guía cómo trabajamos, nuestro compromiso medioambiental con Stripe Climate y el equipo detrás de la asesoría.',
   openGraph: {
-    type: 'profile',
+    type: 'website',
     url: 'https://expertconsulting.es/sobre-mi',
-    title: 'Ksenia Ilicheva — Asesora Fiscal y Legal | EXPERT',
+    title: 'Nosotros — Misión, responsabilidad y equipo | EXPERT',
     description:
-      'Más de 20 años de experiencia en asesoría fiscal, legal y administrativa en España. Colaboradora social AEAT, Holded Solution Partner.',
+      'Nuestra misión, la responsabilidad corporativa que guía cómo trabajamos y nuestro compromiso medioambiental con Stripe Climate.',
     siteName: 'EXPERT — Asesoría Fiscal y Legal',
     locale: 'es_ES',
-    images: [{ url: '/branding/expert%20servicios.png', width: 1200, height: 630, alt: 'Ksenia Ilicheva — EXPERT' }]
+    images: [{ url: '/branding/expert%20servicios.png', width: 1200, height: 630, alt: 'EXPERT — Asesoría Fiscal y Legal' }]
   },
   twitter: { card: 'summary_large_image', images: ['/branding/expert%20servicios.png'] },
   alternates: { canonical: 'https://expertconsulting.es/sobre-mi' }
 };
 
 const credentials = [
-  { Icon: Shield, label: 'Colaboradora social AEAT', text: 'Autorizada para presentar declaraciones ante la Agencia Tributaria en nombre de clientes.' },
+  { Icon: Shield, label: 'Colaboradora social AEAT', text: 'Autorizados para presentar declaraciones ante la Agencia Tributaria en nombre de clientes.' },
   { Icon: Briefcase, label: 'Holded Solution Partner', text: 'Partners certificados de Holded para implementación, migración y formación en el ERP.' },
-  { Icon: Award, label: 'Camerfirma — Punto de Registro', text: 'Autorizada para emitir certificados digitales cualificados para personas y empresas.' },
+  { Icon: Award, label: 'Camerfirma — Punto de Registro', text: 'Autorizados para emitir certificados digitales cualificados para personas y empresas.' },
   { Icon: GraduationCap, label: 'Red PAE', text: 'Punto de Atención al Emprendedor integrado en la red oficial de apoyo a nuevos negocios.' }
 ];
 
 const values = [
-  { title: 'Claridad ante todo', text: 'Los trámites son complejos; la comunicación no tiene por qué serlo. Explico cada paso con claridad y en el idioma que necesites.' },
-  { title: 'Gestión 100 % digital', text: 'Sin desplazamientos innecesarios. Todo el proceso se gestiona de forma online desde cualquier lugar.' },
-  { title: 'Criterio profesional', text: 'No solo presento documentos: analizo tu situación, identifico riesgos y propongo la mejor estrategia para tu caso.' },
-  { title: 'Respuesta rápida', text: 'Los plazos de Hacienda no esperan. Me comprometo a responder y actuar a tiempo, siempre.' }
+  { title: 'Claridad ante todo', text: 'Los trámites son complejos; la comunicación no tiene por qué serlo. Explicamos cada paso con claridad y en el idioma que necesites.' },
+  { title: 'Gestión 100 % digital', text: 'Sin desplazamientos innecesarios. Todo el proceso se gestiona de forma online desde cualquier lugar, con menos papel y menos huella.' },
+  { title: 'Criterio profesional', text: 'No solo presentamos documentos: analizamos tu situación, identificamos riesgos y proponemos la mejor estrategia para tu caso.' },
+  { title: 'Respuesta rápida', text: 'Los plazos de Hacienda no esperan. Nos comprometemos a responder y actuar a tiempo, siempre.' }
 ];
 
-const personJsonLd = {
+const orgJsonLd = {
   '@context': 'https://schema.org',
-  '@type': 'Person',
-  name: 'Ksenia Ilicheva',
-  url: 'https://expertconsulting.es/sobre-mi',
-  jobTitle: 'Asesora Fiscal, Legal y Administrativa',
-  worksFor: {
-    '@type': 'Organization',
-    name: 'EXPERT — Asesoría Fiscal y Legal',
-    url: 'https://expertconsulting.es',
+  '@type': 'Organization',
+  name: 'EXPERT — Asesoría Fiscal y Legal',
+  url: 'https://expertconsulting.es',
+  logo: 'https://expertconsulting.es/branding/expert-app.png',
+  description: 'Asesoría fiscal, legal y administrativa en España. Colaboradora social AEAT, Holded Solution Partner, Punto de Registro Camerfirma y Red PAE.',
+  founder: {
+    '@type': 'Person',
+    name: 'Ksenia Ilicheva',
+    jobTitle: 'Fundadora y asesora fiscal, legal y administrativa',
+    knowsLanguage: ['es', 'ru', 'en'],
+    sameAs: 'https://www.linkedin.com/in/ksenia-ilicheva/',
   },
-  description: 'Más de 20 años de experiencia en asesoría fiscal, legal y administrativa en España. Colaboradora social AEAT, Holded Solution Partner, Punto de Registro Camerfirma y Red PAE.',
-  knowsLanguage: ['es', 'ru', 'en'],
-  sameAs: [
-    'https://www.linkedin.com/in/ksenia-ilicheva/',
-    'https://expertconsulting.es',
-  ],
   hasCredential: [
     { '@type': 'EducationalOccupationalCredential', name: 'Colaboradora Social AEAT', recognizedBy: { '@type': 'Organization', name: 'Agencia Tributaria' } },
     { '@type': 'EducationalOccupationalCredential', name: 'Holded Solution Partner', recognizedBy: { '@type': 'Organization', name: 'Holded' } },
@@ -60,17 +57,18 @@ const personJsonLd = {
   ],
 };
 
-export default function SobreMiPage() {
+export default function NosotrosPage() {
   return (
     <main className="bg-[#F8F6F1] text-[#0D1B2A]">
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(personJsonLd) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(orgJsonLd) }} />
+
       {/* Hero */}
       <section className="brand-blue-bg px-6 py-16 text-[#F8F6F1] md:py-20">
         <div className="mx-auto grid max-w-5xl gap-12 lg:grid-cols-[auto_1fr] lg:items-center">
           <div className="relative mx-auto h-56 w-56 shrink-0 overflow-hidden rounded-full border-4 border-[#D4A017]/40 shadow-2xl lg:h-64 lg:w-64">
             <Image
               src="/avatars/ksenia-perfil.png"
-              alt="Ksenia Ilicheva"
+              alt="Ksenia Ilicheva, fundadora de EXPERT"
               fill
               sizes="256px"
               className="object-cover object-top"
@@ -78,11 +76,11 @@ export default function SobreMiPage() {
             />
           </div>
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.28em] text-[#D4A017]">Asesora fiscal y administrativa</p>
-            <h1 className="mt-3 font-serif text-3xl font-bold leading-tight md:text-5xl">Ksenia Ilicheva</h1>
+            <p className="text-xs font-bold uppercase tracking-[0.28em] text-[#D4A017]">Nosotros</p>
+            <h1 className="mt-3 font-serif text-3xl font-bold leading-tight md:text-5xl">Una asesoría con una misión clara</h1>
             <p className="mt-4 max-w-xl text-base leading-7 text-[#9CA3AF]">
-              Llevo más de 20 años ayudando a personas, familias y empresas a resolver sus obligaciones fiscales,
-              legales y administrativas en España. Trabajo con rigor, claridad y compromiso real con cada caso.
+              Somos el equipo que hay detrás de EXPERT: fiscalidad, extranjería y gestión empresarial resueltas con
+              rigor, tecnología y un compromiso real — con cada cliente, con la sociedad y con el planeta.
             </p>
             <div className="mt-6 flex flex-wrap gap-4">
               <Link
@@ -105,26 +103,93 @@ export default function SobreMiPage() {
         </div>
       </section>
 
+      {/* Misión y objetivos */}
+      <section className="px-6 py-14 md:py-16">
+        <div className="mx-auto max-w-5xl">
+          <div className="flex items-center gap-3">
+            <Target className="h-6 w-6 text-[#D4A017]" />
+            <p className="text-xs font-bold uppercase tracking-[0.28em] text-[#D4A017]">Misión y objetivos</p>
+          </div>
+          <h2 className="mt-4 max-w-3xl font-serif text-2xl font-bold md:text-3xl">
+            Antes que crecer a cualquier precio, hacer las cosas bien.
+          </h2>
+          <p className="mt-5 max-w-3xl text-sm leading-7 text-[#23364D] md:text-base">
+            Nuestro objetivo principal no es tramitar el mayor número de expedientes posible: es que cada cliente
+            reciba una gestión clara, honesta y bien hecha, y que esa forma de trabajar sea sostenible — para las
+            personas que confían en nosotros, para nuestro equipo y para el entorno en el que operamos. La
+            responsabilidad corporativa no es una sección aparte de lo que hacemos: es el criterio con el que
+            decidimos cómo lo hacemos.
+          </p>
+          <div className="mt-8 grid gap-4 sm:grid-cols-3">
+            <div className="border border-[#D4A017]/20 bg-white p-5">
+              <Users className="h-5 w-5 text-[#D4A017]" />
+              <p className="mt-3 text-sm font-bold">Con nuestros clientes</p>
+              <p className="mt-1 text-xs leading-5 text-[#23364D]">Criterio profesional y comunicación honesta, incluso cuando la respuesta no es la que se esperaba.</p>
+            </div>
+            <div className="border border-[#D4A017]/20 bg-white p-5">
+              <Shield className="h-5 w-5 text-[#D4A017]" />
+              <p className="mt-3 text-sm font-bold">Con la sociedad</p>
+              <p className="mt-1 text-xs leading-5 text-[#23364D]">Cumplimiento riguroso de la normativa fiscal y legal, sin atajos, como colaboradores sociales de la AEAT.</p>
+            </div>
+            <div className="border border-[#D4A017]/20 bg-white p-5">
+              <Leaf className="h-5 w-5 text-[#D4A017]" />
+              <p className="mt-3 text-sm font-bold">Con el planeta</p>
+              <p className="mt-1 text-xs leading-5 text-[#23364D]">Una gestión 100&nbsp;% digital y una parte de cada cobro destinada a eliminación de carbono. Ver más abajo.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Compromiso verde / Stripe Climate */}
+      <section className="bg-[#0D1B2A] px-6 py-14 text-[#F8F6F1] md:py-16">
+        <div className="mx-auto max-w-5xl">
+          <div className="flex items-center gap-3">
+            <Leaf className="h-6 w-6 text-[#D4A017]" />
+            <p className="text-xs font-bold uppercase tracking-[0.28em] text-[#D4A017]">Compromiso verde</p>
+          </div>
+          <h2 className="mt-4 max-w-3xl font-serif text-2xl font-bold md:text-3xl">
+            Colaboramos con Stripe Climate
+          </h2>
+          <p className="mt-5 max-w-3xl text-sm leading-7 text-[#D1D5DB] md:text-base">
+            Destinamos el <strong className="text-white">0,5 % de los cobros que procesamos a través de Stripe</strong> a
+            Stripe Climate, el programa de Stripe que financia proyectos de eliminación de carbono de nueva generación.
+            No es un coste adicional para el cliente: es parte de cómo entendemos la responsabilidad de gestionar
+            un negocio digital. Junto con una operativa 100&nbsp;% online — sin desplazamientos ni papeleo
+            innecesario — es nuestra forma de mantener una huella lo más pequeña posible mientras seguimos creciendo.
+          </p>
+          <a
+            href="https://climate.stripe.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-6 inline-flex items-center gap-2 border border-[#D4A017]/50 px-6 py-2.5 text-sm font-semibold text-[#D4A017] transition hover:border-[#D4A017] hover:bg-[#D4A017] hover:text-[#0D1B2A]"
+          >
+            Más sobre Stripe Climate
+            <ArrowRight className="h-4 w-4" />
+          </a>
+        </div>
+      </section>
+
       {/* Bio */}
       <section className="px-6 py-14 md:py-18">
         <div className="mx-auto max-w-5xl grid gap-12 lg:grid-cols-[1fr_360px] lg:items-start">
           <div>
-            <h2 className="font-serif text-2xl font-bold md:text-3xl">Mi historia</h2>
+            <h2 className="font-serif text-2xl font-bold md:text-3xl">Nuestra historia</h2>
             <div className="mt-5 space-y-4 text-sm leading-7 text-[#23364D] md:text-base">
               <p>
-                Empecé mi carrera en el ámbito fiscal y administrativo hace más de dos décadas, cuando los trámites con
-                la Administración eran todavía mayoritariamente presenciales y la digitalización apenas empezaba. Esa
-                experiencia me dio una base sólida en la normativa española y un conocimiento profundo de los procesos
-                reales que hay detrás de cada declaración, permiso o escritura.
+                Todo empezó con Ksenia Ilicheva, que hace más de dos décadas inició su carrera en el ámbito fiscal y
+                administrativo, cuando los trámites con la Administración eran todavía mayoritariamente presenciales
+                y la digitalización apenas empezaba. Esa experiencia sentó una base sólida en la normativa española
+                y un conocimiento profundo de los procesos reales que hay detrás de cada declaración, permiso o
+                escritura.
               </p>
               <p>
-                Con el tiempo, especialicé mi práctica en los colectivos que más lo necesitan: expatriados que llegan a
-                España sin saber por dónde empezar, empresas internacionales que necesitan cumplimiento fiscal local, y
-                autónomos que quieren crecer sin ahogarse en burocracia. Esa combinación de perfiles me ha dado una
-                visión muy completa de los retos fiscales y legales en España.
+                Con el tiempo, especializamos nuestra práctica en los colectivos que más lo necesitan: expatriados
+                que llegan a España sin saber por dónde empezar, empresas internacionales que necesitan cumplimiento
+                fiscal local, y autónomos que quieren crecer sin ahogarse en burocracia. Esa combinación de perfiles
+                nos ha dado una visión muy completa de los retos fiscales y legales en España.
               </p>
               <p>
-                Hoy, a través de EXPERT, ofrezco un servicio completamente digital que permite gestionar cualquier
+                Hoy, a través de EXPERT, ofrecemos un servicio completamente digital que permite gestionar cualquier
                 trámite desde cualquier lugar. Sin desplazamientos, sin papeleo innecesario, con seguimiento claro y
                 comunicación directa.
               </p>
@@ -177,6 +242,8 @@ export default function SobreMiPage() {
               <p className="mt-1 text-sm font-semibold text-[#0D1B2A]">años de experiencia</p>
               <p className="mt-4 font-serif text-4xl font-bold text-[#D4A017]">500+</p>
               <p className="mt-1 text-sm font-semibold text-[#0D1B2A]">clientes gestionados</p>
+              <p className="mt-4 font-serif text-4xl font-bold text-[#D4A017]">0,5 %</p>
+              <p className="mt-1 text-sm font-semibold text-[#0D1B2A]">de cada cobro Stripe, a eliminación de carbono</p>
             </div>
           </div>
         </div>
@@ -188,7 +255,7 @@ export default function SobreMiPage() {
           <p className="text-xs font-bold uppercase tracking-[0.28em] text-[#D4A017]">Hablemos</p>
           <h2 className="mt-3 font-serif text-2xl font-bold md:text-3xl">¿Tienes una consulta?</h2>
           <p className="mx-auto mt-3 max-w-lg text-sm leading-7 text-[#9CA3AF]">
-            Cuéntame tu caso sin compromiso. Analizo tu situación y te propongo la mejor solución.
+            Cuéntanos tu caso sin compromiso. Analizamos tu situación y te proponemos la mejor solución.
           </p>
           <div className="mt-7 flex flex-wrap justify-center gap-4">
             <Link
@@ -201,7 +268,7 @@ export default function SobreMiPage() {
               href="/contacto"
               className="inline-flex min-h-12 items-center gap-2 border border-[#D4A017]/50 px-7 py-3 text-sm font-bold uppercase tracking-wide text-[#D4A017] transition hover:border-[#D4A017] hover:bg-[#D4A017] hover:text-[#0D1B2A]"
             >
-              Escribirme
+              Escríbenos
             </Link>
           </div>
         </div>

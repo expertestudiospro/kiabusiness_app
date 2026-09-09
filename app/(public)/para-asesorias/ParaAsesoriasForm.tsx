@@ -173,6 +173,9 @@ export function ParaAsesoriasForm() {
           <label className={labelClass}>Teléfono / WhatsApp</label>
           <input
             type="tel"
+            inputMode="tel"
+            pattern="[+]?[0-9\s().-]{7,20}"
+            title="Introduce un teléfono válido (7-20 dígitos, puede incluir +, espacios o guiones)"
             value={form.phone}
             onChange={(event) => setField('phone', event.target.value)}
             className={inputClass}

@@ -81,7 +81,7 @@ export function ContactForm() {
 
       <div>
         <label className={labelCls}>Teléfono / WhatsApp</label>
-        <input type="tel" value={form.telefono} onChange={(e) => set('telefono', e.target.value)} placeholder="+34 600 000 000" className={inputCls} />
+        <input type="tel" inputMode="tel" pattern="[+]?[0-9\s().-]{7,20}" title="Introduce un teléfono válido (7-20 dígitos, puede incluir +, espacios o guiones)" value={form.telefono} onChange={(e) => set('telefono', e.target.value)} placeholder="+34 600 000 000" className={inputCls} />
       </div>
 
       <div>

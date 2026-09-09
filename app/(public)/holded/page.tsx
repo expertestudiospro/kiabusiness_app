@@ -343,7 +343,7 @@ export default async function HoldedPage() {
       </section>
 
       {/* ── Process steps ─────────────────────────────────────────────────── */}
-      <section className="px-6 py-16 md:py-20">
+      <section id="formacion" className="scroll-mt-24 px-6 py-16 md:py-20">
         <div className="mx-auto max-w-7xl">
           <div className="mx-auto max-w-3xl text-center">
             <p className="text-xs font-bold uppercase tracking-[0.26em] text-[#D4A017]">Proceso</p>

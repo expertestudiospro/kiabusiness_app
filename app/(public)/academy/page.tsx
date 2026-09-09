@@ -8,6 +8,7 @@ import { FaqSection } from '@/components/site/FaqSection';
 import { getCalAcademyUrl } from '@/lib/utils/cal';
 import { EventTracker } from '@/components/site/EventTracker';
 import { TrackedAnchor } from '@/components/site/TrackedAnchor';
+import { OtherAcademyPrograms } from '@/components/site/OtherAcademyPrograms';
 
 const program = academyPrograms[0];
 
@@ -296,6 +297,9 @@ export default function AcademyPage() {
         </div>
       </section>
       )}
+
+      {/* Otros programas de la Academy */}
+      <OtherAcademyPrograms currentSlug={program.slug} />
 
       {/* FAQ */}
       <FaqSection items={program.faqs} />

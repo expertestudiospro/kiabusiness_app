@@ -1,8 +1,8 @@
 {
-  "name": "EXPERT — Portal de Cliente",
+  "name": "EXPERT — Asesoría Fiscal y Legal",
   "short_name": "EXPERT",
-  "description": "Panel de cliente EXPERT: documentos, expedientes, pagos y comunicaciones.",
-  "start_url": "/dashboard",
+  "description": "Asesoría fiscal, legal y de gestión con Holded. Web, panel de cliente, documentos, expedientes, pagos y comunicaciones.",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#0D1B2A",

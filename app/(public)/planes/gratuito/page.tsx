@@ -148,7 +148,7 @@ export default function PlanGratuitoPage() {
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wide text-[#0D1B2A]">Teléfono *</label>
                 <input
-                  type="tel" name="phone" value={form.phone} onChange={handleChange} required
+                  type="tel" name="phone" inputMode="tel" pattern="[+]?[0-9\s().-]{7,20}" title="Introduce un teléfono válido (7-20 dígitos, puede incluir +, espacios o guiones)" value={form.phone} onChange={handleChange} required
                   placeholder="+34 600 000 000"
                   className="mt-2 w-full border border-[#D4A017]/30 bg-white px-4 py-3 text-sm text-[#0D1B2A] placeholder-[#9CA3AF] focus:border-[#D4A017] focus:outline-none"
                 />
